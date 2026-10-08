@@ -48,3 +48,6 @@ td.num { text-align: right; }
   .trip-form { grid-template-columns: 1fr; }
   .day-nav input { flex: 1; }
 }
+.trip-form .id-field { grid-column: 1 / -1; }
+.id-row { display: flex; gap: 6px; max-width: 420px; }
+.id-row input { flex: 1; }

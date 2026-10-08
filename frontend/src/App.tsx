@@ -31,14 +31,16 @@ const toAlmatyIso = (local: string) => `${local.length === 16 ? `${local}:00` : 
 type Load = { state: 'loading' } | { state: 'error'; message: string } | { state: 'ok'; data: DayResponse };
 type Notice = { kind: 'success' | 'info' | 'error'; text: string } | null;
 
-const emptyForm = { id: '', start: '', end: '', amount: '', payment: 'cash' as Payment, commission: '' };
+// New UUID per trip; kept until the trip is created, so a resend after a network error stays idempotent.
+const newForm = () => ({ id: crypto.randomUUID(), start: '', end: '', amount: '', payment: 'cash' as Payment, commission: '' });
+type Form = ReturnType<typeof newForm>;
 
 export default function App() {
   const [date, setDate] = useState(() => ymdInAlmaty(new Date()));
   const [reload, setReload] = useState(0);
   const [load, setLoad] = useState<Load>({ state: 'loading' });
 
-  const [form, setForm] = useState(emptyForm);
+  const [form, setForm] = useState(newForm);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
 
@@ -55,7 +57,7 @@ export default function App() {
     return () => ctrl.abort();
   }, [date, reload]);
 
-  const set = (k: keyof typeof emptyForm) => (e: { target: { value: string } }) =>
+  const set = (k: keyof Form) => (e: { target: { value: string } }) =>
     setForm({ ...form, [k]: e.target.value });
 
   function validate(): string | null {
@@ -92,11 +94,11 @@ export default function App() {
           ? { kind: 'success', text: `Поездка «${data.trip.id}» добавлена${where}` }
           : { kind: 'info', text: `Такая поездка «${data.trip.id}» уже есть — дубль не создан${where}` },
       );
-      if (status === 201) setForm(emptyForm);
+      if (status === 201) setForm(newForm());
       if (tripDay === date) setReload((n) => n + 1);
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
-        setNotice({ kind: 'error', text: `Поездка с ID «${form.id}» уже существует с другими данными. Укажите другой ID.` });
+        setNotice({ kind: 'error', text: `Поездка с ID «${form.id}» уже существует с другими данными. Сгенерируйте новый ID.` });
       } else if (e instanceof ApiError && e.status === 422) {
         setNotice({ kind: 'error', text: `Сервер отклонил данные: ${e.message}` });
       } else {
@@ -185,7 +187,12 @@ export default function App() {
       <section>
         <h2>Добавить поездку</h2>
         <form onSubmit={onSubmit} className="trip-form">
-          <label>ID<input value={form.id} onChange={set('id')} maxLength={100} required /></label>
+          <label className="id-field">ID (UUID)
+            <span className="id-row">
+              <input value={form.id} onChange={set('id')} maxLength={100} required />
+              <button type="button" onClick={() => setForm({ ...form, id: crypto.randomUUID() })} title="Новый ID">↻</button>
+            </span>
+          </label>
           <label>Начало (время Алматы, UTC+05:00)
             <input type="datetime-local" value={form.start} onChange={set('start')} required />
           </label>
