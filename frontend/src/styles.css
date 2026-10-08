@@ -1,0 +1,50 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  background: #f5f6f8;
+  color: #1f2328;
+}
+main { max-width: 900px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 1.6rem; margin: 8px 0 16px; }
+h2 { font-size: 1.2rem; margin: 24px 0 12px; }
+button, input, select { font: inherit; }
+button {
+  padding: 8px 12px; border: 1px solid #c6ccd4; border-radius: 6px;
+  background: #fff; cursor: pointer;
+}
+button:disabled { opacity: 0.6; cursor: default; }
+button[type='submit'] { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+input, select { padding: 7px 8px; border: 1px solid #c6ccd4; border-radius: 6px; background: #fff; min-width: 0; }
+
+.day-nav { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.hint { color: #59636e; font-size: 0.85rem; margin: 8px 0; }
+.muted { color: #8c959f; }
+.status { padding: 16px; background: #fff; border-radius: 8px; color: #59636e; }
+.status.error { color: #b42318; }
+
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 16px; }
+.card { background: #fff; border-radius: 8px; padding: 12px; }
+.card .label { color: #59636e; font-size: 0.85rem; }
+.card .value { font-size: 1.3rem; font-weight: 600; margin-top: 4px; white-space: nowrap; }
+
+.table-wrap { overflow-x: auto; background: #fff; border-radius: 8px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #eaeef2; white-space: nowrap; }
+th { font-size: 0.85rem; color: #59636e; font-weight: 500; }
+td.num { text-align: right; }
+
+.trip-form { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; background: #fff; padding: 16px; border-radius: 8px; }
+.trip-form label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: #59636e; }
+.trip-form button { grid-column: 1 / -1; justify-self: start; }
+
+.notice { padding: 10px 12px; border-radius: 6px; }
+.notice.success { background: #e6f4ea; color: #1a7f37; }
+.notice.info { background: #ddf4ff; color: #0969da; }
+.notice.error { background: #ffebe9; color: #b42318; }
+
+@media (max-width: 640px) {
+  .cards { grid-template-columns: repeat(2, 1fr); }
+  .trip-form { grid-template-columns: 1fr; }
+  .day-nav input { flex: 1; }
+}
