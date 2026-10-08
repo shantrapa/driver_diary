@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ApiError, getDay } from './api';
 import TripDialog from './TripDialog';
+import { autofill, lastDays } from './demo';
 import type { DayResponse, Payment, TripResult } from './types';
 
 const TZ = 'Asia/Almaty';
@@ -34,7 +35,12 @@ function shiftDay(ymd: string, delta: number): string {
 }
 
 type Load = { state: 'loading' } | { state: 'error'; message: string } | { state: 'ok'; data: DayResponse };
-type Toast = { kind: 'success' | 'info'; text: string } | null;
+type Toast = { kind: 'success' | 'info' | 'error'; text: string } | null;
+
+const AUTOFILL_DAYS = 7;
+
+const pluralRu = new Intl.PluralRules('ru');
+const tripsWord = (n: number) => `${n} ${{ one: 'поездка', few: 'поездки' }[pluralRu.select(n) as 'one' | 'few'] ?? 'поездок'}`;
 
 export default function App() {
   const today = ymdInAlmaty(new Date());
@@ -43,6 +49,7 @@ export default function App() {
   const [load, setLoad] = useState<Load>({ state: 'loading' });
   const [dialogOpen, setDialogOpen] = useState(false);
   const [toast, setToast] = useState<Toast>(null);
+  const [filling, setFilling] = useState<{ done: number; total: number } | null>(null);
 
   useEffect(() => {
     if (!date) return;
@@ -75,6 +82,28 @@ export default function App() {
     if (tripDay === date) setReload((n) => n + 1);
   }
 
+  async function runAutofill() {
+    const end = date || today;
+    setFilling({ done: 0, total: 0 });
+    try {
+      const { created, existing } = await autofill(lastDays(end, AUTOFILL_DAYS), (done, total) => setFilling({ done, total }));
+      setToast({
+        kind: 'success',
+        text: created
+          ? `Автозаполнение: добавлено ${tripsWord(created)} за ${AUTOFILL_DAYS} дней${existing ? `, уже были ${existing}` : ''}`
+          : `Демо-поездки за эти ${AUTOFILL_DAYS} дней уже есть — дубли не созданы`,
+      });
+    } catch (e) {
+      setToast({ kind: 'error', text: `Автозаполнение прервано: ${e instanceof ApiError ? e.message : 'сервер недоступен'}` });
+    } finally {
+      setFilling(null);
+      setReload((n) => n + 1);
+    }
+  }
+
+  const fillLabel = filling ? `Заполнение… ${filling.done}/${filling.total || '…'}` : 'Автозаполнение';
+  const fillTitle = `Добавить демо-поездки за ${AUTOFILL_DAYS} дней по выбранную дату включительно`;
+
   return (
     <>
       <header className="topbar">
@@ -83,9 +112,14 @@ export default function App() {
             <span className="logo" aria-hidden>🚕</span>
             <h1>Дневник смен водителя</h1>
           </div>
-          <button className="btn primary" onClick={() => setDialogOpen(true)}>
-            <span aria-hidden>＋</span> Новая поездка
-          </button>
+          <div className="topbar-actions">
+            <button className="btn ghost" onClick={runAutofill} disabled={!!filling} title={fillTitle} aria-label={fillLabel}>
+              <span aria-hidden>✨</span> <span className="lbl">{fillLabel}</span>
+            </button>
+            <button className="btn primary" onClick={() => setDialogOpen(true)} aria-label="Новая поездка">
+              <span aria-hidden>＋</span> <span className="lbl-sm">Новая поездка</span>
+            </button>
+          </div>
         </div>
       </header>
 
@@ -122,7 +156,9 @@ export default function App() {
           </div>
         )}
 
-        {date && load.state === 'ok' && <DayView data={load.data} onAdd={() => setDialogOpen(true)} />}
+        {date && load.state === 'ok' && (
+          <DayView data={load.data} onAdd={() => setDialogOpen(true)} onAutofill={runAutofill} filling={!!filling} />
+        )}
       </main>
 
       <TripDialog open={dialogOpen} onClose={() => setDialogOpen(false)} onSaved={onSaved} />
@@ -132,7 +168,14 @@ export default function App() {
   );
 }
 
-function DayView({ data, onAdd }: { data: DayResponse; onAdd: () => void }) {
+interface DayViewProps {
+  data: DayResponse;
+  onAdd: () => void;
+  onAutofill: () => void;
+  filling: boolean;
+}
+
+function DayView({ data, onAdd, onAutofill, filling }: DayViewProps) {
   const s = data.summary;
   const { cash, card } = s.payment_breakdown;
   const cashPct = s.revenue ? (cash / s.revenue) * 100 : 0;
@@ -174,7 +217,10 @@ function DayView({ data, onAdd }: { data: DayResponse; onAdd: () => void }) {
         {data.trips.length === 0 ? (
           <div className="state">
             <p className="state-title">Нет поездок за выбранный день</p>
-            <button className="btn primary" onClick={onAdd}>＋ Добавить поездку</button>
+            <div className="state-actions">
+              <button className="btn primary" onClick={onAdd}>＋ Добавить поездку</button>
+              <button className="btn ghost" onClick={onAutofill} disabled={filling}>✨ Заполнить демо-данными за {AUTOFILL_DAYS} дней</button>
+            </div>
           </div>
         ) : (
           <ul className="trip-list">
