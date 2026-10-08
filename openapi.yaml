@@ -1,0 +1,282 @@
+openapi: 3.0.3
+info:
+  title: Дневник смен водителя — API
+  version: 0.1.0
+  description: |
+    API для проверки двух требований:
+
+    1. **Поездки и сводка за день** — `GET /api/days/{date}` возвращает список поездок
+       за выбранную дату и сводку: число поездок, выручка, комиссия, «на руки»,
+       разбивка наличные/карта.
+    2. **Добавление поездки** — `POST /api/trips` с проверкой данных
+       (сумма > 0, окончание позже начала и др.). Повторная отправка той же
+       поездки не создаёт дубль.
+
+    Правила:
+    - Отчётный часовой пояс — `Asia/Almaty` (UTC+05:00). Поездка относится к дате своего **начала** в этом поясе.
+    - Суммы — целые тенге (KZT). `net = revenue - commission`.
+      `payment_breakdown` — валовая выручка (до комиссии), `cash + card = revenue`.
+    - Уникальность поездки — по `id`. Тот же `id` и те же данные → `200`, `duplicate: true`;
+      тот же `id`, но другие данные → `409 TRIP_ID_CONFLICT`. Время сравнивается как момент,
+      т. е. `10:00+05:00` и `05:00Z` — одно и то же.
+
+    Порядок ручной проверки (на демоданных `backend/data/trips.json`):
+    1. `GET /api/days/2026-10-01` → 2 поездки, 3900 / 585 / 3315, наличные 1500, карта 2400.
+    2. `GET /api/days/2026-10-02` → пустой день, все нули.
+    3. `POST /api/trips` с примером `new` → `201`, `duplicate: false`.
+    4. Тот же запрос ещё раз → `200`, `duplicate: true`; `GET /api/days/2026-10-02` → по-прежнему 1 поездка.
+    5. Пример `sameIdOtherData` → `409`.
+    6. Примеры `amountZero`, `endBeforeStart` → `422`.
+servers:
+  - url: http://localhost:8000
+    description: Локальный backend (uvicorn)
+tags:
+  - name: days
+    description: Поездки и сводка за день
+  - name: trips
+    description: Добавление поездок
+
+paths:
+  /api/days/{date}:
+    get:
+      tags: [days]
+      operationId: getDay
+      summary: Поездки и сводка за календарный день
+      parameters:
+        - name: date
+          in: path
+          required: true
+          description: Дата строго в формате `YYYY-MM-DD` (по Asia/Almaty).
+          schema:
+            type: string
+            pattern: '^\d{4}-\d{2}-\d{2}$'
+          examples:
+            sampleDay:
+              summary: День из демоданных (2 поездки)
+              value: '2026-10-01'
+            emptyDay:
+              summary: День без поездок
+              value: '2026-10-02'
+            invalid:
+              summary: Несуществующая дата → 422
+              value: '2026-02-30'
+      responses:
+        '200':
+          description: 'Поездки дня (по возрастанию начала, затем `id`) и сводка. Для пустого дня — `trips: []` и нули.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayResponse'
+              examples:
+                sampleDay:
+                  summary: '2026-10-01'
+                  value:
+                    date: '2026-10-01'
+                    timezone: Asia/Almaty
+                    summary:
+                      trip_count: 2
+                      revenue: 3900
+                      commission: 585
+                      net: 3315
+                      payment_breakdown: { cash: 1500, card: 2400 }
+                    trips:
+                      - { id: t1, start: '2026-10-01T08:10:00+05:00', end: '2026-10-01T08:32:00+05:00', amount: 2400, payment: card, commission: 360 }
+                      - { id: t2, start: '2026-10-01T09:05:00+05:00', end: '2026-10-01T09:20:00+05:00', amount: 1500, payment: cash, commission: 225 }
+                emptyDay:
+                  summary: День без поездок
+                  value:
+                    date: '2026-10-02'
+                    timezone: Asia/Almaty
+                    summary:
+                      trip_count: 0
+                      revenue: 0
+                      commission: 0
+                      net: 0
+                      payment_breakdown: { cash: 0, card: 0 }
+                    trips: []
+        '422':
+          description: Дата не в формате `YYYY-MM-DD` или не существует.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+              example:
+                detail:
+                  - { loc: [path, day], msg: date must be YYYY-MM-DD, type: value_error }
+        '500':
+          $ref: '#/components/responses/StorageError'
+
+  /api/trips:
+    post:
+      tags: [trips]
+      operationId: createTrip
+      summary: Добавить поездку (идемпотентно по `id`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Trip'
+            examples:
+              new:
+                summary: Новая поездка → 201 (повторная отправка → 200, duplicate)
+                value: { id: t3, start: '2026-10-02T10:00:00+05:00', end: '2026-10-02T10:25:00+05:00', amount: 2000, payment: cash, commission: 300 }
+              sameMomentOtherOffset:
+                summary: Тот же t3, время в UTC (тот же момент) → 200, duplicate
+                value: { id: t3, start: '2026-10-02T05:00:00Z', end: '2026-10-02T05:25:00Z', amount: 2000, payment: cash, commission: 300 }
+              sameIdOtherData:
+                summary: Тот же t3, другая сумма → 409
+                value: { id: t3, start: '2026-10-02T10:00:00+05:00', end: '2026-10-02T10:25:00+05:00', amount: 2500, payment: cash, commission: 300 }
+              amountZero:
+                summary: Сумма 0 → 422
+                value: { id: bad-1, start: '2026-10-02T11:00:00+05:00', end: '2026-10-02T11:20:00+05:00', amount: 0, payment: cash, commission: 0 }
+              endBeforeStart:
+                summary: Окончание раньше начала → 422
+                value: { id: bad-2, start: '2026-10-02T11:00:00+05:00', end: '2026-10-02T10:50:00+05:00', amount: 1000, payment: card, commission: 100 }
+              noTimezone:
+                summary: Время без часового пояса → 422
+                value: { id: bad-3, start: '2026-10-02T11:00:00', end: '2026-10-02T11:20:00', amount: 1000, payment: card, commission: 100 }
+      responses:
+        '201':
+          description: Поездка создана и сохранена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TripResult'
+              example:
+                trip: { id: t3, start: '2026-10-02T10:00:00+05:00', end: '2026-10-02T10:25:00+05:00', amount: 2000, payment: cash, commission: 300 }
+                duplicate: false
+        '200':
+          description: Поездка с этим `id` и теми же данными уже есть — дубль не создан, возвращена сохранённая запись.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TripResult'
+              example:
+                trip: { id: t3, start: '2026-10-02T10:00:00+05:00', end: '2026-10-02T10:25:00+05:00', amount: 2000, payment: cash, commission: 300 }
+                duplicate: true
+        '409':
+          description: Поездка с этим `id` уже есть, но с другими данными. Ничего не перезаписано.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: { code: TRIP_ID_CONFLICT, message: Trip with this id already exists with different data }
+        '422':
+          description: |
+            Данные не прошли проверку: `amount <= 0`, `end <= start`, `commission < 0` или `> amount`,
+            `payment` не `cash`/`card`, время без часового пояса, суммы не целые, лишние поля, пустой `id`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+              example:
+                detail:
+                  - { type: greater_than, loc: [body, amount], msg: Input should be greater than 0, input: 0, ctx: { gt: 0 } }
+        '500':
+          $ref: '#/components/responses/StorageError'
+
+components:
+  schemas:
+    Trip:
+      type: object
+      additionalProperties: false
+      required: [id, start, end, amount, payment, commission]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Идентификатор от отправителя (веб-форма генерирует UUID). Без пробелов по краям.
+          example: t3
+        start:
+          type: string
+          format: date-time
+          description: ISO 8601 **с часовым поясом**.
+          example: '2026-10-02T10:00:00+05:00'
+        end:
+          type: string
+          format: date-time
+          description: ISO 8601 с часовым поясом; строго позже `start`.
+          example: '2026-10-02T10:25:00+05:00'
+        amount:
+          type: integer
+          minimum: 1
+          description: Полная стоимость поездки, тенге (> 0).
+          example: 2000
+        payment:
+          type: string
+          enum: [cash, card]
+          example: cash
+        commission:
+          type: integer
+          minimum: 0
+          description: Удержанная комиссия, тенге; `0 <= commission <= amount`.
+          example: 300
+    Summary:
+      type: object
+      required: [trip_count, revenue, commission, net, payment_breakdown]
+      properties:
+        trip_count: { type: integer, description: Число поездок }
+        revenue: { type: integer, description: Выручка — сумма `amount` }
+        commission: { type: integer, description: Сумма `commission` }
+        net: { type: integer, description: На руки — `revenue - commission` }
+        payment_breakdown:
+          type: object
+          description: Валовая выручка по способу оплаты; `cash + card = revenue`.
+          required: [cash, card]
+          properties:
+            cash: { type: integer, description: Наличные }
+            card: { type: integer, description: Карта }
+    DayResponse:
+      type: object
+      required: [date, timezone, summary, trips]
+      properties:
+        date: { type: string, format: date, example: '2026-10-01' }
+        timezone: { type: string, example: Asia/Almaty }
+        summary: { $ref: '#/components/schemas/Summary' }
+        trips:
+          type: array
+          items: { $ref: '#/components/schemas/Trip' }
+    TripResult:
+      type: object
+      required: [trip, duplicate]
+      properties:
+        trip: { $ref: '#/components/schemas/Trip' }
+        duplicate:
+          type: boolean
+          description: '`true`, если такая поездка уже была сохранена ранее.'
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, enum: [TRIP_ID_CONFLICT, STORAGE_ERROR] }
+            message: { type: string }
+    ValidationError:
+      type: object
+      description: Стандартный формат ошибок FastAPI/Pydantic.
+      properties:
+        detail:
+          type: array
+          items:
+            type: object
+            properties:
+              loc:
+                type: array
+                items: { oneOf: [{ type: string }, { type: integer }] }
+              msg: { type: string }
+              type: { type: string }
+  responses:
+    StorageError:
+      description: Файл данных повреждён или недоступен. Детали — только в логе сервера.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: { code: STORAGE_ERROR, message: Trip storage is unavailable }

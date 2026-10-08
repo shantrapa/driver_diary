@@ -1,6 +1,7 @@
-import { FormEvent, useEffect, useState } from 'react';
-import { ApiError, createTrip, getDay } from './api';
-import type { DayResponse, Payment } from './types';
+import { useEffect, useState } from 'react';
+import { ApiError, getDay } from './api';
+import TripDialog from './TripDialog';
+import type { DayResponse, Payment, TripResult } from './types';
 
 const TZ = 'Asia/Almaty';
 const PAYMENT_LABEL: Record<Payment, string> = { cash: 'Наличные', card: 'Карта' };
@@ -20,29 +21,28 @@ const fmtTime = (iso: string, day: string) => {
   return ymdInAlmaty(d) === day ? timeFmt.format(d) : dateTimeFmt.format(d);
 };
 
+const durationMin = (start: string, end: string) => Math.round((Date.parse(end) - Date.parse(start)) / 60000);
+const fmtDuration = (min: number) => (min < 60 ? `${min} мин` : `${Math.floor(min / 60)} ч ${min % 60} мин`);
+
+// Date-only value: format in UTC so the calendar day never shifts.
+const dayTitleFmt = new Intl.DateTimeFormat('ru-RU', { timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+const dayTitle = (ymd: string) => dayTitleFmt.format(new Date(`${ymd}T00:00:00Z`));
+
 function shiftDay(ymd: string, delta: number): string {
   const [y, m, d] = ymd.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d + delta)).toISOString().slice(0, 10);
 }
 
-// datetime-local value "YYYY-MM-DDTHH:mm[:ss]" is entered as Almaty time.
-const toAlmatyIso = (local: string) => `${local.length === 16 ? `${local}:00` : local}+05:00`;
-
 type Load = { state: 'loading' } | { state: 'error'; message: string } | { state: 'ok'; data: DayResponse };
-type Notice = { kind: 'success' | 'info' | 'error'; text: string } | null;
-
-// New UUID per trip; kept until the trip is created, so a resend after a network error stays idempotent.
-const newForm = () => ({ id: crypto.randomUUID(), start: '', end: '', amount: '', payment: 'cash' as Payment, commission: '' });
-type Form = ReturnType<typeof newForm>;
+type Toast = { kind: 'success' | 'info'; text: string } | null;
 
 export default function App() {
-  const [date, setDate] = useState(() => ymdInAlmaty(new Date()));
+  const today = ymdInAlmaty(new Date());
+  const [date, setDate] = useState(today);
   const [reload, setReload] = useState(0);
   const [load, setLoad] = useState<Load>({ state: 'loading' });
-
-  const [form, setForm] = useState(newForm);
-  const [saving, setSaving] = useState(false);
-  const [notice, setNotice] = useState<Notice>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [toast, setToast] = useState<Toast>(null);
 
   useEffect(() => {
     if (!date) return;
@@ -52,165 +52,148 @@ export default function App() {
       .then((data) => setLoad({ state: 'ok', data }))
       .catch((e) => {
         if (ctrl.signal.aborted) return;
-        setLoad({ state: 'error', message: e instanceof ApiError ? e.message : 'Сервер недоступен' });
+        setLoad({ state: 'error', message: e instanceof ApiError ? e.message : 'сервер недоступен' });
       });
     return () => ctrl.abort();
   }, [date, reload]);
 
-  const set = (k: keyof Form) => (e: { target: { value: string } }) =>
-    setForm({ ...form, [k]: e.target.value });
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 5000);
+    return () => clearTimeout(t);
+  }, [toast]);
 
-  function validate(): string | null {
-    const amount = Number(form.amount);
-    const commission = Number(form.commission);
-    if (!form.id.trim() || form.id !== form.id.trim()) return 'ID не должен быть пустым или с пробелами по краям';
-    if (!form.start || !form.end) return 'Укажите начало и окончание';
-    if (form.end <= form.start) return 'Окончание должно быть позже начала';
-    if (!Number.isInteger(amount) || amount <= 0) return 'Сумма должна быть целым числом больше 0';
-    if (!Number.isInteger(commission) || commission < 0 || commission > amount)
-      return 'Комиссия — целое число от 0 до суммы поездки';
-    return null;
+  function onSaved({ trip, duplicate }: TripResult) {
+    setDialogOpen(false);
+    const tripDay = ymdInAlmaty(new Date(trip.start));
+    const where = tripDay === date ? '' : ` — на дату ${tripDay}`;
+    setToast(
+      duplicate
+        ? { kind: 'info', text: `Такая поездка уже есть, дубль не создан${where}` }
+        : { kind: 'success', text: `Поездка добавлена${where}` },
+    );
+    if (tripDay === date) setReload((n) => n + 1);
   }
-
-  async function onSubmit(e: FormEvent) {
-    e.preventDefault();
-    const err = validate();
-    if (err) return setNotice({ kind: 'error', text: err });
-    setSaving(true);
-    setNotice(null);
-    try {
-      const { status, data } = await createTrip({
-        id: form.id,
-        start: toAlmatyIso(form.start),
-        end: toAlmatyIso(form.end),
-        amount: Number(form.amount),
-        payment: form.payment,
-        commission: Number(form.commission),
-      });
-      const tripDay = ymdInAlmaty(new Date(data.trip.start));
-      const where = tripDay === date ? '' : ` (дата ${tripDay})`;
-      setNotice(
-        status === 201
-          ? { kind: 'success', text: `Поездка «${data.trip.id}» добавлена${where}` }
-          : { kind: 'info', text: `Такая поездка «${data.trip.id}» уже есть — дубль не создан${where}` },
-      );
-      if (status === 201) setForm(newForm());
-      if (tripDay === date) setReload((n) => n + 1);
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 409) {
-        setNotice({ kind: 'error', text: `Поездка с ID «${form.id}» уже существует с другими данными. Сгенерируйте новый ID.` });
-      } else if (e instanceof ApiError && e.status === 422) {
-        setNotice({ kind: 'error', text: `Сервер отклонил данные: ${e.message}` });
-      } else {
-        setNotice({ kind: 'error', text: e instanceof ApiError ? e.message : 'Не удалось связаться с сервером' });
-      }
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  const s = load.state === 'ok' ? load.data.summary : null;
-  const cards: [string, string][] = s
-    ? [
-        ['Поездок', String(s.trip_count)],
-        ['Выручка', money(s.revenue)],
-        ['Комиссия', money(s.commission)],
-        ['На руки', money(s.net)],
-        ['Наличные', money(s.payment_breakdown.cash)],
-        ['Карта', money(s.payment_breakdown.card)],
-      ]
-    : [];
 
   return (
-    <main>
-      <h1>Дневник смен водителя</h1>
-
-      <div className="day-nav">
-        <button onClick={() => setDate(shiftDay(date, -1))} disabled={!date}>← Предыдущий день</button>
-        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} aria-label="Дата" required />
-        <button onClick={() => setDate(shiftDay(date, 1))} disabled={!date}>Следующий день →</button>
-      </div>
-      <p className="hint">Время Алматы (UTC+05:00). Поездка относится к дню своего начала.</p>
-
-      {!date && <p className="status">Выберите дату</p>}
-      {date && load.state === 'loading' && <p className="status">Загрузка…</p>}
-      {date && load.state === 'error' && (
-        <div className="status error">
-          Не удалось загрузить данные: {load.message}{' '}
-          <button onClick={() => setReload((n) => n + 1)}>Повторить</button>
+    <>
+      <header className="topbar">
+        <div className="topbar-inner">
+          <div className="brand">
+            <span className="logo" aria-hidden>🚕</span>
+            <h1>Дневник смен водителя</h1>
+          </div>
+          <button className="btn primary" onClick={() => setDialogOpen(true)}>
+            <span aria-hidden>＋</span> Новая поездка
+          </button>
         </div>
-      )}
+      </header>
 
-      {date && load.state === 'ok' && (
-        <>
-          <section className="cards">
-            {cards.map(([label, value]) => (
-              <div className="card" key={label}>
-                <div className="label">{label}</div>
-                <div className="value">{value}</div>
-              </div>
-            ))}
-          </section>
-          <p className="hint">«Наличные» и «Карта» — выручка до вычета комиссии; «На руки» = выручка − комиссия.</p>
+      <main className="page">
+        <section className="day-head">
+          <div>
+            <p className="eyebrow">{date === today ? 'Сегодня' : 'Отчёт за день'} · Asia/Almaty</p>
+            <h2 className="day-title">{date ? dayTitle(date) : 'Выберите дату'}</h2>
+          </div>
+          <div className="day-nav">
+            <button className="btn ghost" onClick={() => setDate(shiftDay(date, -1))} disabled={!date} aria-label="Предыдущий день">
+              ‹ <span className="lbl">Предыдущий день</span>
+            </button>
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} aria-label="Дата" required />
+            <button className="btn ghost" onClick={() => setDate(shiftDay(date, 1))} disabled={!date} aria-label="Следующий день">
+              <span className="lbl">Следующий день</span> ›
+            </button>
+            {date !== today && <button className="btn ghost" onClick={() => setDate(today)}>Сегодня</button>}
+          </div>
+        </section>
 
-          <section>
-            <h2>Поездки</h2>
-            {load.data.trips.length === 0 ? (
-              <p className="status">Нет поездок за выбранный день</p>
-            ) : (
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Начало</th><th>Окончание</th><th>Сумма</th><th>Оплата</th><th>Комиссия</th><th>ID</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {load.data.trips.map((t) => (
-                      <tr key={t.id}>
-                        <td>{fmtTime(t.start, date)}</td>
-                        <td>{fmtTime(t.end, date)}</td>
-                        <td className="num">{money(t.amount)}</td>
-                        <td>{PAYMENT_LABEL[t.payment]}</td>
-                        <td className="num">{money(t.commission)}</td>
-                        <td className="muted">{t.id}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
-        </>
-      )}
+        {date && load.state === 'loading' && (
+          <div aria-busy="true" aria-label="Загрузка">
+            <div className="summary">{[0, 1, 2].map((i) => <div key={i} className="card skeleton" />)}</div>
+            <p className="muted small">Загрузка…</p>
+          </div>
+        )}
 
-      <section>
-        <h2>Добавить поездку</h2>
-        <form onSubmit={onSubmit} className="trip-form">
-          <label className="id-field">ID (UUID)
-            <span className="id-row">
-              <input value={form.id} onChange={set('id')} maxLength={100} required />
-              <button type="button" onClick={() => setForm({ ...form, id: crypto.randomUUID() })} title="Новый ID">↻</button>
-            </span>
-          </label>
-          <label>Начало (время Алматы, UTC+05:00)
-            <input type="datetime-local" value={form.start} onChange={set('start')} required />
-          </label>
-          <label>Окончание (время Алматы, UTC+05:00)
-            <input type="datetime-local" value={form.end} onChange={set('end')} required />
-          </label>
-          <label>Сумма, ₸<input type="number" min={1} step={1} value={form.amount} onChange={set('amount')} required /></label>
-          <label>Оплата
-            <select value={form.payment} onChange={set('payment')}>
-              <option value="cash">Наличные</option>
-              <option value="card">Карта</option>
-            </select>
-          </label>
-          <label>Комиссия, ₸<input type="number" min={0} step={1} value={form.commission} onChange={set('commission')} required /></label>
-          <button type="submit" disabled={saving}>{saving ? 'Сохранение…' : 'Добавить поездку'}</button>
-        </form>
-        {notice && <p className={`notice ${notice.kind}`}>{notice.text}</p>}
+        {date && load.state === 'error' && (
+          <div className="state error">
+            <p className="state-title">Не удалось загрузить данные</p>
+            <p className="muted">{load.message}</p>
+            <button className="btn primary" onClick={() => setReload((n) => n + 1)}>Повторить</button>
+          </div>
+        )}
+
+        {date && load.state === 'ok' && <DayView data={load.data} onAdd={() => setDialogOpen(true)} />}
+      </main>
+
+      <TripDialog open={dialogOpen} onClose={() => setDialogOpen(false)} onSaved={onSaved} />
+
+      {toast && <div className={`toast ${toast.kind}`} role="status">{toast.text}</div>}
+    </>
+  );
+}
+
+function DayView({ data, onAdd }: { data: DayResponse; onAdd: () => void }) {
+  const s = data.summary;
+  const { cash, card } = s.payment_breakdown;
+  const cashPct = s.revenue ? (cash / s.revenue) * 100 : 0;
+
+  return (
+    <>
+      <section className="summary">
+        <div className="card hero">
+          <span className="label">На руки</span>
+          <span className="value">{money(s.net)}</span>
+          <span className="sub">выручка − комиссия</span>
+        </div>
+        <div className="card">
+          <span className="label">Выручка</span>
+          <span className="value">{money(s.revenue)}</span>
+        </div>
+        <div className="card">
+          <span className="label">Комиссия</span>
+          <span className="value">{money(s.commission)}</span>
+        </div>
+        <div className="card count">
+          <span className="label">Поездок</span>
+          <span className="value">{s.trip_count}</span>
+        </div>
+        <div className="card payments">
+          <span className="label">Оплата (выручка до комиссии)</span>
+          <div className={s.revenue ? 'bar' : 'bar empty'} aria-hidden>
+            <span className="bar-cash" style={{ width: `${cashPct}%` }} />
+          </div>
+          <div className="legend">
+            <span><i className="dot pay-cash" />Наличные <b>{money(cash)}</b></span>
+            <span><i className="dot pay-card" />Карта <b>{money(card)}</b></span>
+          </div>
+        </div>
       </section>
-    </main>
+
+      <section className="trips">
+        <h3>Поездки</h3>
+        {data.trips.length === 0 ? (
+          <div className="state">
+            <p className="state-title">Нет поездок за выбранный день</p>
+            <button className="btn primary" onClick={onAdd}>＋ Добавить поездку</button>
+          </div>
+        ) : (
+          <ul className="trip-list">
+            {data.trips.map((t) => (
+              <li key={t.id} className="trip">
+                <div className="trip-time">
+                  <span className="time">{fmtTime(t.start, data.date)} – {fmtTime(t.end, data.date)}</span>
+                  <span className="muted small">{fmtDuration(durationMin(t.start, t.end))} · <span className="trip-id" title={t.id}>{t.id}</span></span>
+                </div>
+                <span className={`chip pay-${t.payment}`}>{PAYMENT_LABEL[t.payment]}</span>
+                <div className="trip-money">
+                  <span className="amount">{money(t.amount)}</span>
+                  <span className="muted small">комиссия {money(t.commission)}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </>
   );
 }
