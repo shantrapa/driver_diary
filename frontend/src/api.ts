@@ -23,6 +23,8 @@ function errorMessage(status: number, body: unknown): string {
 async function request<T>(url: string, init?: RequestInit): Promise<{ status: number; data: T }> {
   const res = await fetch(url, { ...init, headers: { Accept: 'application/json', ...init?.headers } });
   const body = await res.json().catch(() => null);
+  // Backend always answers with JSON; a non-JSON error comes from the dev proxy when backend is down.
+  if (!res.ok && body === null) throw new ApiError(res.status, 'сервер API недоступен (запущен ли backend на порту 8000?)');
   if (!res.ok) throw new ApiError(res.status, errorMessage(res.status, body));
   return { status: res.status, data: body as T };
 }
